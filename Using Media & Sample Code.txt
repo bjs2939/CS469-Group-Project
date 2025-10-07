@@ -1,0 +1,96 @@
+Using Media in Your Programs 
+Jeffrey Hemmes posted Sep 29, 2025 7:32 AM
+This page automatically marks posts as read as you scroll.Adjust automatic marking as read setting
+Some of the example project ideas involve creating a media server. The obvious question that arises when thinking about doing such a project is how would the media, whether audio or video, be played in the client? Here is a primer with examples on how to write code in either Java or C/C++ that can play different types of multimedia.
+
+Playing Audio
+This is intended to be a tutorial on how to load and play audio files in popular formats such as MP3 using either Java or C.
+
+Java with JACo MP3 Player
+The simplest way to play audio files (MP3 audio in particular), is with the JACo MP3 Player library available at http://jacomp3player.sourceforge.net/. From that site you can download the library (jaco-mp3-player-xxx.jar), which you then save in a convenient location, typically where standard Java libraries are saved, e.g., /usr/share/java, C:\Program Files (x86)\Java, etc. You will also need to separately add this jar file to any Java project that uses it.
+
+This is a very easy to use library with only a few methods and data types you need to know to get started. At a minimum, you need to import the JACo MP3 Player library:
+
+import jaco.mp3.player.MP3Player;
+
+Then code to load an MP3 file and play it would look like this:
+
+MP3Player player = new MP3Player(new File("song.mp3"));
+
+player.play();
+
+// This is needed to keep the song playing
+while(!player.isStopped()) {
+   try {
+      Thread.sleep(1000);
+   } catch (InterruptedException ex) {
+      System.err.println(e);
+   }
+}
+
+C/C++ with SDL
+The Simple DirectMedia Layer (SDL) library provides a simple and easy to use API for playing various types of audio files. The SDL library includes two components: The SDL Sound library, which is intended primary for audio decoding; and the SDL Mixer, which is intended for both audio decoding and playback. Programs using SDL for playback mostly use the SDL Mixer library, but occasionally a function in the SDL API is needed.
+
+Audio playback involves the following steps:
+
+Initialize the SDL Mixer
+Open the audio file and specify the following:
+Audio frequency in hertz. A common frequency (sample rate) for MP3 audio is 44.1 kHz.
+Audio format. Indicates whether 16 or 32 bit, big or little endian byte order, etc. The constant AUDIO_S16SYS is appropriate for MP3 audio.
+Number of channels. A value of 1 represents mono, while 2 represents stereo.
+Buffer size. The size of the data chunks that will be processed.
+Load the audio file and store in a Music object. A variety of different audio formats are supported.
+Play the music represented by the Music object.
+Loop until music is no longer playing.
+Deallocate dynamic memory allocations.
+Note that the SDL2 and SDL2_mixer libraries require additional linker flags to build correctly. On Unix-based systems, you would build the program much like this:
+
+    gcc -o playaudio playaudio.c `sdl2-config --cflags --libs` -lSDL2_mixer
+
+Please refer to the example C audio player program in the code examples in the Student Resources.
+
+Playing Video
+Here we look at a couple of ways to play video with sound in a program written in either Java or C++ (C doesn't work as well for this, but C++ is straightforward enough)
+
+Playing Video in a Java Program Using libVLC
+You are likely familiar with VLC, a free and popular audio and video playback application. In addition to the application, VLC also provides a programming interface with which you can write code that plays multimedia content. Although a VLC library is available for Java, it is relatively immature, can be fussy to use, and is not particularly well documented. The VLC libraries for C++ and Python, however, work very well and are relatively easy to use. A better approach for Java, therefore, would be to write a Java application that invokes the Python interpreter as a separate process. The Python process, in turn, runs a Python program that uses the VLC library to play a video file. The Python program would be written much like the example program at the bottom of this page.
+
+Please refer to the example Java/Python video player program in the course content I originally wrote as an example program for CS493 (Senior Capstone), but may have applicability here. This program assumes only that Python and the python-vlc library are installed. To run the program, modify the path to the Python 3 executable on your system, and also be sure to set the correct working directory for the project. On Windows systems, the program typically resides in the directory C:\Users\(Your Windows User Name)\AppData\Local\Programs\Python. On Unix systems, it is typically installed in /usr/bin. Refer to the Python example at the bottom of this page for instructions on installing the VLC Python library.
+
+Screenshot of video player using Java, Python, and libVLC
+
+Playing Video in a C++ Program Using libVLC
+The libVLC library is another option for playing video files. Once the VLC development and runtime libraries are installed, writing a program to play videos with sound is relatively straightforward. The steps involved are:
+
+Initialize the VLC library and create a VLC instance.
+Use the VLC instance to create a data structure representation of the video we wish to play, i.e., a video object.
+Use the video object to create a video player object.
+Play the video using the video player object.
+Set the duration the video player will play. The program will run for the number of seconds specified regardless of the actual length of the video content being played.
+Stop the video playback at the end of the time duration.
+Please refer to the example C++ video player program using libVLC in the course content.
+
+Screenshot of video player using C++ and libVLC
+
+Python with VLC
+Just as with many things, Python makes video playback with sound simple. The best way is to use the python-vlc library that is installed using pip. To install the Python VLC library, at the command prompt type:
+
+    pip install python-vlc
+
+Then run the program (assuming the program file name is videoplayer.py and the video file video.mp4 is in the same directory as the program), e.g,:
+
+    python3 videoplayer.py
+
+An example Python program is below. Comments indicate the steps involved in loading the video file and playing the media.
+
+import vlc
+import time
+
+# Open the video file and create a MediaPlayer object
+videoPlayer = vlc.MediaPlayer('video.mp4')
+
+# Begin parsing and playing video
+videoPlayer.play()
+
+# How long to play the video (in seconds), regardless of its actual length. In this example, the video will play for 60 seconds.
+time.sleep(60)
