@@ -13,8 +13,12 @@
 #include <alsa/asoundlib.h>
 #endif
 
+// Main mpg123 and ALSA Functions
 mpg123_handle *init_mpg123(const char *path, long *rate, int *channels);
 snd_pcm_t *setup_alsa(long rate, int channels);
+void decode_loop(mpg123_handle *mh, snd_pcm_t *pcm, int channels);
+
+// Utility Functions
 void cleanup(mpg123_handle *mh, snd_pcm_t *pcm);
 
 int main(int argc, char **argv) {
@@ -42,57 +46,12 @@ int main(int argc, char **argv) {
     snd_pcm_t *pcm = NULL; 
 #endif  
 
-    // ---- Decode loop ----
-    size_t frame_bytes = (size_t)channels * 2; // S16
-#ifndef NO_AUDIO
-    size_t buffer_bytes = (size_t)1024 * frame_bytes;
-#else
-    size_t buffer_bytes = 16384; // decode-only
-#endif
+    // Decode Loop
+    decode_loop(mh, pcm, channels);
 
-    unsigned char *buf = (unsigned char*)malloc(buffer_bytes);
-#ifndef NO_AUDIO
-    if (!buf) { fprintf(stderr, "malloc failed\n"); goto done_pcm; }
-#else
-    if (!buf) { fprintf(stderr, "malloc failed\n"); goto done_mh; }
-#endif
+    // Clean up
+    cleanup(mh, pcm);
 
-    size_t total_out = 0;
-    while (1) {
-        size_t got = 0;
-        int r = mpg123_read(mh, buf, buffer_bytes, &got);
-        if (r == MPG123_DONE) break;
-        if (r != MPG123_OK && r != MPG123_NEW_FORMAT) { fprintf(stderr, "decode error\n"); break; }
-
-        total_out += got;
-
-#ifndef NO_AUDIO
-        // write to ALSA
-        const short *samples = (const short*)buf;
-        size_t frames_to_write = got / frame_bytes;
-        while (frames_to_write > 0) {
-            snd_pcm_sframes_t wrote = snd_pcm_writei(pcm, samples, frames_to_write);
-            if (wrote == -EPIPE) { snd_pcm_prepare(pcm); continue; } // XRUN
-            if (wrote < 0) { fprintf(stderr, "ALSA write error: %s\n", snd_strerror(wrote)); break; }
-            samples += wrote * channels;
-            frames_to_write -= wrote;
-        }
-#endif
-    }
-
-    printf("Decoded %zu bytes of PCM\n", total_out);
-    free(buf);
-
-#ifndef NO_AUDIO
-    snd_pcm_drain(pcm);
-done_pcm:
-    if (pcm) snd_pcm_close(pcm);
-#endif
-
-done_mh:
-    mpg123_close(mh);
-    mpg123_delete(mh);
-    mpg123_exit();
     return 0;
 }
 
@@ -174,6 +133,57 @@ snd_pcm_t *setup_alsa(long rate, int channels) {
     return pcm;
 }
 #endif
+
+/**
+ * @brief The main loop for decoding the MP3 file, and writing the audio data to the ALSA device.
+ */
+void decode_loop(mpg123_handle *mh, snd_pcm_t *pcm, int channels) {
+    size_t frame_bytes = (size_t)channels * 2; // S16
+#ifndef NO_AUDIO
+    size_t buffer_bytes = (size_t)1024 * frame_bytes;
+#else
+    size_t buffer_bytes = 16384; // decode-only
+#endif
+
+    unsigned char *buf = (unsigned char*)malloc(buffer_bytes);
+#ifndef NO_AUDIO
+    if (!buf) { fprintf(stderr, "malloc failed\n"); goto done_pcm; }
+#else
+    if (!buf) { fprintf(stderr, "malloc failed\n"); goto done_mh; }
+#endif
+
+    size_t total_out = 0;
+    while (1) {
+        size_t got = 0;
+        int r = mpg123_read(mh, buf, buffer_bytes, &got);
+        if (r == MPG123_DONE) break;
+        if (r != MPG123_OK && r != MPG123_NEW_FORMAT) { fprintf(stderr, "decode error\n"); break; }
+
+        total_out += got;
+
+#ifndef NO_AUDIO
+        // write to ALSA
+        const short *samples = (const short*)buf;
+        size_t frames_to_write = got / frame_bytes;
+        while (frames_to_write > 0) {
+            snd_pcm_sframes_t wrote = snd_pcm_writei(pcm, samples, frames_to_write);
+            if (wrote == -EPIPE) { snd_pcm_prepare(pcm); continue; } // XRUN
+            if (wrote < 0) { fprintf(stderr, "ALSA write error: %s\n", snd_strerror(wrote)); break; }
+            samples += wrote * channels;
+            frames_to_write -= wrote;
+        }
+#endif
+    }
+
+    printf("Decoded %zu bytes of PCM\n", total_out);
+    free(buf);
+
+#ifndef NO_AUDIO
+    snd_pcm_drain(pcm);
+done_pcm:
+    if (pcm) snd_pcm_close(pcm);
+#endif
+}
 
 /**
  * @brief Cleans up all allocated resources for mpg123 and ALSA
