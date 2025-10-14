@@ -37,26 +37,81 @@
 #define KEY_FILE        "key.pem"
 #define BUF_SZ 8192
 #define MAX_LINE 512
+#define MAX_PENDING_CONNECTIONS 16
 
+// Client context structure
 typedef struct {
     int client_fd;
     SSL *ssl;
     struct sockaddr_in addr;
 } client_ctx_t;
 
-static void die(const char *fmt, ...) {
-    va_list ap; va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap); va_end(ap);
-    fprintf(stderr, "\n");
-    exit(EXIT_FAILURE);
+// Server Initialization and Setup
+void init_openssl();
+static SSL_CTX *make_ctx(void);
+static int create_server_socket(uint16_t port);
+
+// Client Connection Handling
+static void *serve_one(void *arg);
+
+// Utility Functions
+static void die(const char*fmt, ...);
+static void log_msg(const char *fmt, ...);
+static bool safe_filename(const char *name);
+static ssize_t ssl_readline(SSL *ssl, char *buf, size_t cap);
+static int send_all_ssl(SSL *ssl, const void *buf, size_t len);
+static int handle_list(SSL *ssl);
+static int handle_get(SSL *ssl, const char *fname);
+
+int main(int argc, char **argv) {
+    signal(SIGPIPE, SIG_IGN);
+
+    int port = (argc >= 2) ? atoi(argv[1]) : DEFAULT_PORT;
+
+    // Ensure media directory exists
+    struct stat st;
+    if (stat(ROOT_DIR, &st) != 0 || !S_ISDIR(st.st_mode))
+        die("Create directory %s and put mp3 files there", ROOT_DIR);
+
+    init_openssl();
+    SSL_CTX *ctx = make_ctx();
+
+    int srv = create_server_socket((uint16_t)port);
+    log_msg("Listening on %d. Serving from %s", port, ROOT_DIR);
+
+    while (1) {
+        struct sockaddr_in ca; socklen_t clen = sizeof ca;
+        int cfd = accept(srv, (struct sockaddr *)&ca, &clen);
+        if (cfd < 0) { perror("accept"); continue; }
+
+        SSL *ssl = SSL_new(ctx);
+        SSL_set_fd(ssl, cfd);
+
+        client_ctx_t *cc = calloc(1, sizeof *cc);
+        cc->client_fd = cfd; cc->ssl = ssl; cc->addr = ca;
+
+        pthread_t th;
+        if (pthread_create(&th, NULL, serve_one, cc) != 0) {
+            perror("pthread_create");
+            SSL_free(ssl);
+            close(cfd);
+            free(cc);
+            continue;
+        }
+        pthread_detach(th);
+    }
+
+    close(srv);
+    SSL_CTX_free(ctx);
+    EVP_cleanup();
+    return 0;
 }
 
-static void log_msg(const char *fmt, ...) {
-    va_list ap; va_start(ap, fmt);
-    vfprintf(stdout, fmt, ap); va_end(ap);
-    fprintf(stdout, "\n"); fflush(stdout);
+//--- Server Initialization and Setup ---//
+void init_openssl() {
+    SSL_load_error_strings();
+    OpenSSL_add_ssl_algorithms();
 }
-
 
 static SSL_CTX *make_ctx(void) {
     const SSL_METHOD *m = TLS_server_method();
@@ -82,7 +137,7 @@ static SSL_CTX *make_ctx(void) {
     return ctx;
 }
 
-static int listen_on(uint16_t port) {
+static int create_server_socket(uint16_t port) {
     int s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) die("socket: %s", strerror(errno));
     int one = 1;
@@ -97,6 +152,61 @@ static int listen_on(uint16_t port) {
     if (listen(s, 16) < 0)
         die("listen: %s", strerror(errno));
     return s;
+}
+
+//--- Client Connection Handling ---//
+static void *serve_one(void *arg) {
+    client_ctx_t *c = (client_ctx_t *)arg;
+    char ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &c->addr.sin_addr, ip, sizeof ip);
+    log_msg("Client connected from %s", ip);
+
+    if (SSL_accept(c->ssl) <= 0) {
+        ERR_print_errors_fp(stderr);
+        goto done;
+    }
+
+    char line[MAX_LINE];
+    while (1) {
+        ssize_t r = ssl_readline(c->ssl, line, sizeof line);
+        if (r <= 0) break;
+
+        // Commands: LIST  |  GET <fname>  |  QUIT
+        if (strcmp(line, "LIST") == 0) {
+            if (handle_list(c->ssl) != 0) break;
+        } else if (strncmp(line, "GET ", 4) == 0) {
+            const char *fname = line + 4;
+            if (handle_get(c->ssl, fname) != 0) break;
+        } else if (strcmp(line, "QUIT") == 0) {
+            const char *msg = "OK BYE\n";
+            send_all_ssl(c->ssl, msg, strlen(msg));
+            break;
+        } else {
+            const char *msg = "ERR CMD\n";
+            if (send_all_ssl(c->ssl, msg, strlen(msg)) != 0) break;
+        }
+    }
+
+done:
+    SSL_shutdown(c->ssl);
+    SSL_free(c->ssl);
+    close(c->client_fd);
+    free(c);
+    return NULL;
+}
+
+//--- Utility Functions ---//
+static void die(const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap); va_end(ap);
+    fprintf(stderr, "\n");
+    exit(EXIT_FAILURE);
+}
+
+static void log_msg(const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    vfprintf(stdout, fmt, ap); va_end(ap);
+    fprintf(stdout, "\n"); fflush(stdout);
 }
 
 static bool safe_filename(const char *name) {
@@ -181,7 +291,6 @@ static int handle_list(SSL *ssl) {
     return 0;
 }
 
-
 static int handle_get(SSL *ssl, const char *fname) {
     if (!safe_filename(fname)) {
         const char *msg = "ERR NAME\n";
@@ -215,87 +324,4 @@ static int handle_get(SSL *ssl, const char *fname) {
     return (n < 0) ? -1 : 0;
 }
 
-static void *serve_one(void *arg) {
-    client_ctx_t *c = (client_ctx_t *)arg;
-    char ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &c->addr.sin_addr, ip, sizeof ip);
-    log_msg("Client connected from %s", ip);
 
-    if (SSL_accept(c->ssl) <= 0) {
-        ERR_print_errors_fp(stderr);
-        goto done;
-    }
-
-    char line[MAX_LINE];
-    while (1) {
-        ssize_t r = ssl_readline(c->ssl, line, sizeof line);
-        if (r <= 0) break;
-
-        // Commands: LIST  |  GET <fname>  |  QUIT
-        if (strcmp(line, "LIST") == 0) {
-            if (handle_list(c->ssl) != 0) break;
-        } else if (strncmp(line, "GET ", 4) == 0) {
-            const char *fname = line + 4;
-            if (handle_get(c->ssl, fname) != 0) break;
-        } else if (strcmp(line, "QUIT") == 0) {
-            const char *msg = "OK BYE\n";
-            send_all_ssl(c->ssl, msg, strlen(msg));
-            break;
-        } else {
-            const char *msg = "ERR CMD\n";
-            if (send_all_ssl(c->ssl, msg, strlen(msg)) != 0) break;
-        }
-    }
-
-done:
-    SSL_shutdown(c->ssl);
-    SSL_free(c->ssl);
-    close(c->client_fd);
-    free(c);
-    return NULL;
-}
-
-int main(int argc, char **argv) {
-    signal(SIGPIPE, SIG_IGN);
-
-    int port = (argc >= 2) ? atoi(argv[1]) : DEFAULT_PORT;
-
-    // Ensure media directory exists
-    struct stat st;
-    if (stat(ROOT_DIR, &st) != 0 || !S_ISDIR(st.st_mode))
-        die("Create directory %s and put mp3 files there", ROOT_DIR);
-
-    SSL_load_error_strings();
-    OpenSSL_add_ssl_algorithms();
-    SSL_CTX *ctx = make_ctx();
-
-    int srv = listen_on((uint16_t)port);
-    log_msg("Listening on %d. Serving from %s", port, ROOT_DIR);
-
-    while (1) {
-        struct sockaddr_in ca; socklen_t clen = sizeof ca;
-        int cfd = accept(srv, (struct sockaddr *)&ca, &clen);
-        if (cfd < 0) { perror("accept"); continue; }
-
-        SSL *ssl = SSL_new(ctx);
-        SSL_set_fd(ssl, cfd);
-
-        client_ctx_t *cc = calloc(1, sizeof *cc);
-        cc->client_fd = cfd; cc->ssl = ssl; cc->addr = ca;
-
-        pthread_t th;
-        if (pthread_create(&th, NULL, serve_one, cc) != 0) {
-            perror("pthread_create");
-            SSL_free(ssl);
-            close(cfd);
-            free(cc);
-            continue;
-        }
-        pthread_detach(th);
-    }
-
-    close(srv);
-    SSL_CTX_free(ctx);
-    EVP_cleanup();
-    return 0;
-}
