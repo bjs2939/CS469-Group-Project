@@ -149,7 +149,7 @@ static int create_server_socket(uint16_t port) {
     a.sin_port = htons(port);
     if (bind(s, (struct sockaddr *)&a, sizeof(a)) < 0)
         die("bind: %s", strerror(errno));
-    if (listen(s, 16) < 0)
+    if (listen(s, MAX_PENDING_CONNECTIONS) < 0)
         die("listen: %s", strerror(errno));
     return s;
 }
