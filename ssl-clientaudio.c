@@ -1,5 +1,5 @@
 /**
- * @file ssl-serveraudio.c
+ * @file ssl-clientaudio.c
  * @authors ** Kenneth Sherwood, Thomas Wintenburg, Bradley Spence **
  * @date ** 10/14/2025 **
  * @brief Secure MP3 server for encrypted media distribution and process replication.
