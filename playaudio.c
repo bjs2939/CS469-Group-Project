@@ -14,6 +14,8 @@
 #endif
 
 mpg123_handle *init_mpg123(const char *path, long *rate, int *channels);
+snd_pcm_t *setup_alsa(long rate, int channels);
+void cleanup(mpg123_handle *mh, snd_pcm_t *pcm);
 
 int main(int argc, char **argv) {
     if (argc != 2) {
@@ -30,25 +32,15 @@ int main(int argc, char **argv) {
     }
 
 #ifndef NO_AUDIO
-    // ---- ALSA setup ----
-    snd_pcm_t *pcm = NULL;
-    snd_pcm_hw_params_t *hw = NULL;
-    if (snd_pcm_open(&pcm, "default", SND_PCM_STREAM_PLAYBACK, 0) < 0) {
-        fprintf(stderr, "ALSA open failed (try setting up PulseAudio/WSLg)\n");
-        goto done_mh;
+    // Setup ALSA
+    snd_pcm_t *pcm = setup_alsa(rate, channels);
+    if (!pcm) {
+        cleanup(mh, NULL);
+        return 1;
     }
-    snd_pcm_hw_params_malloc(&hw);
-    snd_pcm_hw_params_any(pcm, hw);
-    snd_pcm_hw_params_set_access(pcm, hw, SND_PCM_ACCESS_RW_INTERLEAVED);
-    snd_pcm_hw_params_set_format(pcm, hw, SND_PCM_FORMAT_S16_LE);
-    snd_pcm_hw_params_set_channels(pcm, hw, channels);
-    unsigned int urate = (unsigned int)rate;
-    snd_pcm_hw_params_set_rate_near(pcm, hw, &urate, NULL);
-    snd_pcm_uframes_t frames = 1024;
-    snd_pcm_hw_params_set_period_size_near(pcm, hw, &frames, NULL);
-    if (snd_pcm_hw_params(pcm, hw) < 0) { fprintf(stderr, "ALSA set params failed\n"); snd_pcm_hw_params_free(hw); goto done_pcm; }
-    snd_pcm_hw_params_free(hw);
-#endif
+#else
+    snd_pcm_t *pcm = NULL; 
+#endif  
 
     // ---- Decode loop ----
     size_t frame_bytes = (size_t)channels * 2; // S16
@@ -144,4 +136,58 @@ mpg123_handle *init_mpg123(const char *path, long *rate, int *channels) {
     mpg123_format(mh, rate, channels, MPG123_ENC_SIGNED_16);
 
     return mh;
+}
+
+#ifndef NO_AUDIO
+/**
+ * @brief Sets up ALSA.
+ * @return A handle to the PCM device, or NULL on failure.
+ */
+snd_pcm_t *setup_alsa(long rate, int channels) {
+    snd_pcm_t *pcm = NULL;
+    snd_pcm_hw_params_t *hw = NULL;
+
+    if (snd_pcm_open(&pcm, "default", SND_PCM_STREAM_PLAYBACK, 0) < 0) {
+        fprintf(stderr, "ALSA open failed (try setting up PulseAudio/WSLg)\n");
+        goto done_mh;
+    }
+
+    snd_pcm_hw_params_malloc(&hw);
+    snd_pcm_hw_params_any(pcm, hw);
+    snd_pcm_hw_params_set_access(pcm, hw, SND_PCM_ACCESS_RW_INTERLEAVED);
+    snd_pcm_hw_params_set_format(pcm, hw, SND_PCM_FORMAT_S16_LE);
+    snd_pcm_hw_params_set_channels(pcm, hw, channels);
+
+    unsigned int urate = (unsigned int)rate;
+    snd_pcm_hw_params_set_rate_near(pcm, hw, &urate, NULL);
+
+    snd_pcm_uframes_t frames = 1024;
+    snd_pcm_hw_params_set_period_size_near(pcm, hw, &frames, NULL);
+
+    if (snd_pcm_hw_params(pcm, hw) < 0) { 
+        fprintf(stderr, "ALSA set params failed\n"); 
+        snd_pcm_hw_params_free(hw); 
+        return NULL; 
+    }
+
+    snd_pcm_hw_params_free(hw);
+    return pcm;
+}
+#endif
+
+/**
+ * @brief Cleans up all allocated resources for mpg123 and ALSA
+ */
+void cleanup(mpg123_handle *mh, snd_pcm_t *pcm) {
+#ifndef NO_AUDIO
+    if(pcm) {
+        snd_pcm_close(pcm);
+    }
+#endif
+
+    if (mh) {
+        mpg123_close(mh);
+        mpg123_delete(mh);
+    }
+    mpg123_exit()
 }
