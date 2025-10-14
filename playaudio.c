@@ -1,3 +1,10 @@
+/**
+ * @file playaudio.c
+ * @author ** Kenneth Sherwood, Thomas Wintenburg, Bradley Spence **
+ * @date ** 10/14/2025 **
+ * @brief Contains the main logic for playing mp3 files.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <mpg123.h>
