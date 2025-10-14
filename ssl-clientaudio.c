@@ -268,8 +268,6 @@ int mp3_play(const char *filepath) {
 }
 
 /**
- * Fetch list of files from server and present a numeric menu
- * Returns number of files, fills names[0..count-1] with filenames
  * Robust LIST reader: parse "OK <count>\n" then read exactly <count> lines
  * Fetch "OK <count>\n" then read exactly <count> filenames (one per line).
  * 
