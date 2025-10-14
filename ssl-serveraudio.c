@@ -1,5 +1,12 @@
-// srms_server.c
-// Simple TLS file server with LIST and GET. Thread-per-connection.
+/**
+ * @file ssl-serveraudio.c
+ * @authors ** Kenneth Sherwood, Thomas Wintenburg, Bradley Spence **
+ * @date ** 10/14/2025 **
+ * @brief Secure MP3 server for encrypted media distribution.
+ * 
+ * srms_server.c
+ * Simple TLS file server with LIST and GET. Thread-per-connection. 
+ */
 
 #define _POSIX_C_SOURCE 200809L
 #include <arpa/inet.h>
