@@ -47,77 +47,30 @@
 #define DEFAULT_HOST        "127.0.0.1"
 #define BUFFER_SIZE         4096
 #define OUTPUT_PATH         "downloaded.mp3"
+#define MAX_FILENAME_LEN    256
+#define MAX_FILES           256
 
-// SSL setup
-SSL_CTX* init_ssl_context();
-SSL* connect_ssl(SSL_CTX *ctx, const char *hostname, int port);
-
-// MP3 transfer and playback
-int request_mp3_file(SSL *ssl, const char *filename, const char *output_path);
-int play_mp3(const char *filepath);
+// SSL/TLS Functions
+SSL_CTX* ssl_init_context();
+SSL* ssl_connect(SSL_CTX *ctx, const char *hostname, int port);
 static int ssl_readline_simple(SSL *ssl, char *buf, size_t cap);
 
+// MP3 and File Handling Functions
+int mp3_request_and_download(SSL *ssl, const char *filename, const char *output_path);
+int mp3_play(const char *filepath);
+int fetch_file_list(SSL *ssl, char names[][MAX_FILENAME_LEN], int max_names)
 
 // User interaction
-void display_genre_menu(char *genre);
-void get_search_term(char *term);
-void to_lowercase(char *str);
+void ui_display_genre_menu(char *genre);
+void ui_get_search_term(char *term);
 
-
-
-
-// Fetch list of files from server and present a numeric menu
-// Returns number of files, fills names[0..count-1] with filenames
-// Robust LIST reader: parse "OK <count>\n" then read exactly <count> lines
-// Fetch "OK <count>\n" then read exactly <count> filenames (one per line).
-int fetch_list(SSL *ssl, char names[][256], int max_names) {
-    // Ask server
-    if (SSL_write(ssl, "LIST\n", 5) <= 0) {
-        fprintf(stderr, "SSL_write LIST failed\n");
-        return -1;
-    }
-
-    // Read header line
-    char line[1024];
-    if (ssl_readline_simple(ssl, line, sizeof(line)) < 0) {
-        fprintf(stderr, "LIST header read failed\n");
-        return -1;
-    }
-
-    int count = -1;
-    if (sscanf(line, "OK %d", &count) != 1 || count < 0) {
-        fprintf(stderr, "Bad LIST header: %s\n", line);
-        return -1;
-    }
-    if (count == 0) return 0;
-
-    // Read exactly 'count' filenames
-    int got = 0;
-    for (; got < count && got < max_names; ++got) {
-        int r = ssl_readline_simple(ssl, line, sizeof(line));
-        if (r < 0) {
-            fprintf(stderr, "LIST body read failed after %d entries\n", got);
-            return -1;
-        }
-        // empty line ends early
-        if (line[0] == 0) break;
-
-        // Copy name, clamp to 255
-        size_t len = strlen(line);
-        if (len > 255) len = 255;
-        memcpy(names[got], line, len);
-        names[got][len] = 0;
-    }
-    return got;
-} //end fetch
-
-
-
+// Utility Functions
+void util_to_lowercase(char *str);
 
 int main(void) {
     // 1) TLS setup + connect
     SSL_CTX *ctx = init_ssl_context();
-    SSL *ssl = connect_ssl(ctx, DEFAULT_HOST, DEFAULT_PORT);
+    SSL *ssl = ssl_connect(ctx, DEFAULT_HOST, DEFAULT_PORT);
     printf("Secure connection established.\n");
 
     // 2) Ask server for list of files
@@ -158,9 +111,9 @@ int main(void) {
     const char *filename = names[choice - 1];
 
     // 5) GET and play
-    if (request_mp3_file(ssl, filename, OUTPUT_PATH) == 0) {
+    if (mp3_request_and_download(ssl, filename, OUTPUT_PATH) == 0) {
         printf("Download complete. Playing MP3...\n");
-        play_mp3(OUTPUT_PATH);
+        mp3_play(OUTPUT_PATH);
     } else {
         fprintf(stderr, "Download failed.\n");
     }
@@ -172,7 +125,8 @@ int main(void) {
     return 0;
 } //end main
 
-SSL_CTX* init_ssl_context() {
+//--- SSL and TLS ---//
+SSL_CTX* ssl_init_context() {
     SSL_library_init();
     OpenSSL_add_all_algorithms();
     SSL_load_error_strings();
@@ -189,7 +143,7 @@ SSL_CTX* init_ssl_context() {
     return ctx;
 }
 
-SSL* connect_ssl(SSL_CTX *ctx, const char *hostname, int port) {
+SSL* ssl_connect(SSL_CTX *ctx, const char *hostname, int port) {
     int sock;
     struct sockaddr_in addr;
     SSL *ssl;
@@ -201,20 +155,43 @@ SSL* connect_ssl(SSL_CTX *ctx, const char *hostname, int port) {
 
     if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
         perror("Connection failed");
-        exit(EXIT_FAILURE);
+        return NULL;
     }
 
     ssl = SSL_new(ctx);
     SSL_set_fd(ssl, sock);
     if (SSL_connect(ssl) <= 0) {
         ERR_print_errors_fp(stderr);
-        exit(EXIT_FAILURE);
+        SSL_free(ssl);
+        close(sock);
+        return NULL;
     }
 
     return ssl;
 }
 
-int request_mp3_file(SSL *ssl, const char *filename, const char *output_path) {
+/**
+ * @brief Read a single '\n'-terminated line from SSL, trim CR/LF.
+ * @return Number of bytes in line (>=0) or -1 on error/closed.
+ */
+static int ssl_readline_simple(SSL *ssl, char *buf, size_t cap) {
+    size_t n = 0;
+    while (n + 1 < cap) {
+        char c;
+        int r = SSL_read(ssl, &c, 1);
+        if (r <= 0) return -1;
+        buf[n++] = c;
+        if (c == '\n') break;
+    }
+    buf[n] = 0;
+    while (n && (buf[n-1] == '\n' || buf[n-1] == '\r')) {
+        buf[--n] = 0;
+    }
+    return (int)n;
+}
+
+//--- MP3 and File Handling --//
+int mp3_request_and_download(SSL *ssl, const char *filename, const char *output_path) {
     // Send GET
     char request[256];
     snprintf(request, sizeof(request), "GET %s\n", filename);
@@ -258,27 +235,7 @@ int request_mp3_file(SSL *ssl, const char *filename, const char *output_path) {
     return 0;
 } //end requestMp3File
 
-
-
-// Read a single '\n'-terminated line from SSL, trim CR/LF.
-// Returns number of bytes in line (>=0) or -1 on error/closed.
-static int ssl_readline_simple(SSL *ssl, char *buf, size_t cap) {
-    size_t n = 0;
-    while (n + 1 < cap) {
-        char c;
-        int r = SSL_read(ssl, &c, 1);
-        if (r <= 0) return -1;
-        buf[n++] = c;
-        if (c == '\n') break;
-    }
-    buf[n] = 0;
-    while (n && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = 0;
-    return (int)n;
-}
-
-
-
-int play_mp3(const char *filepath) {
+int mp3_play(const char *filepath) {
     mpg123_handle *mh;
     unsigned char *audio;
     size_t done;
@@ -310,7 +267,57 @@ int play_mp3(const char *filepath) {
     return 0;
 }
 
-void display_genre_menu(char *genre) {
+/**
+ * Fetch list of files from server and present a numeric menu
+ * Returns number of files, fills names[0..count-1] with filenames
+ * Robust LIST reader: parse "OK <count>\n" then read exactly <count> lines
+ * Fetch "OK <count>\n" then read exactly <count> filenames (one per line).
+ * 
+ * @brief Fetches a list of files from the server.
+ * @return The number of files received, or -1 on error.
+ */
+int fetch_file_list(SSL *ssl, char names[][MAX_FILENAME_LEN], int max_names) {
+    // Ask server
+    if (SSL_write(ssl, "LIST\n", 5) <= 0) {
+        fprintf(stderr, "SSL_write LIST failed\n");
+        return -1;
+    }
+
+    // Read header line
+    char line[1024];
+    if (ssl_readline_simple(ssl, line, sizeof(line)) < 0) {
+        fprintf(stderr, "LIST header read failed\n");
+        return -1;
+    }
+
+    int count = -1;
+    if (sscanf(line, "OK %d", &count) != 1 || count < 0) {
+        fprintf(stderr, "Bad LIST header: %s\n", line);
+        return -1;
+    }
+    if (count == 0) return 0;
+
+    // Read exactly 'count' filenames
+    int received_count = 0;
+    for (; received_count < count && received_count < max_names; ++received_count) {
+        if (ssl_readline_simple(ssl, line, sizeof(line)) < 0) {
+            fprintf(stderr, "LIST body read failed after %d entries\n", received_count);
+            return -1;
+        }        
+        // empty line ends early
+        if (line[0] == 0) break;
+
+        // Copy name, clamp to 255
+        size_t len = strlen(line);
+        if (len > 255) len = 255;
+        memcpy(names[received_count], line, len);
+        names[received_count][len] = 0;
+    }
+    return received_count;
+} //end fetch
+
+//--- User Interface and Interaction ---//
+void ui_display_genre_menu(char *genre) {
     printf("Select a genre:\n");
     printf("1. Country\n2. Pop\n3. Hip Hop\n4. R&B\n5. Rock\n");
     printf("Enter genre name: ");
@@ -318,13 +325,14 @@ void display_genre_menu(char *genre) {
     genre[strcspn(genre, "\n")] = '\0';
 }
 
-void get_search_term(char *term) {
+void ui_get_search_term(char *term) {
     printf("Enter artist name or song title: ");
     fgets(term, 128, stdin);
     term[strcspn(term, "\n")] = '\0';
 }
 
-void to_lowercase(char *str) {
+//--- Utility Functions ---//
+void util_to_lowercase(char *str) {
     for (int i = 0; str[i]; i++) {
         str[i] = tolower((unsigned char)str[i]);
     }
