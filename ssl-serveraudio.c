@@ -52,6 +52,7 @@ static SSL_CTX *make_ctx(void);
 static int create_server_socket(uint16_t port);
 
 // Client Connection Handling
+static void server_loop(int server_fd, SSL_CTX *ctx);
 static void *serve_one(void *arg);
 
 // Utility Functions
@@ -70,38 +71,20 @@ int main(int argc, char **argv) {
 
     // Ensure media directory exists
     struct stat st;
-    if (stat(ROOT_DIR, &st) != 0 || !S_ISDIR(st.st_mode))
+    if (stat(ROOT_DIR, &st) != 0 || !S_ISDIR(st.st_mode)) {
         die("Create directory %s and put mp3 files there", ROOT_DIR);
-
+    }
+    
     init_openssl();
     SSL_CTX *ctx = make_ctx();
+    int server_fd = create_server_socket((uint16_t)port);
 
-    int srv = create_server_socket((uint16_t)port);
     log_msg("Listening on %d. Serving from %s", port, ROOT_DIR);
 
-    while (1) {
-        struct sockaddr_in ca; socklen_t clen = sizeof ca;
-        int cfd = accept(srv, (struct sockaddr *)&ca, &clen);
-        if (cfd < 0) { perror("accept"); continue; }
+    server_loop(server_fd, ctx);
 
-        SSL *ssl = SSL_new(ctx);
-        SSL_set_fd(ssl, cfd);
-
-        client_ctx_t *cc = calloc(1, sizeof *cc);
-        cc->client_fd = cfd; cc->ssl = ssl; cc->addr = ca;
-
-        pthread_t th;
-        if (pthread_create(&th, NULL, serve_one, cc) != 0) {
-            perror("pthread_create");
-            SSL_free(ssl);
-            close(cfd);
-            free(cc);
-            continue;
-        }
-        pthread_detach(th);
-    }
-
-    close(srv);
+    // Cleanup
+    close(server_fd);
     SSL_CTX_free(ctx);
     EVP_cleanup();
     return 0;
@@ -155,6 +138,35 @@ static int create_server_socket(uint16_t port) {
 }
 
 //--- Client Connection Handling ---//
+static void server_loop(int server_fd, SSL_CTX *ctx) {
+    while (1) {
+        struct sockaddr_in ca; socklen_t clen = sizeof ca;
+        int cfd = accept(server_fd, (struct sockaddr *)&ca, &clen);
+        if (cfd < 0) { 
+            perror("accept"); 
+            continue; 
+        }
+
+        SSL *ssl = SSL_new(ctx);
+        SSL_set_fd(ssl, cfd);
+
+        client_ctx_t *cc = calloc(1, sizeof *cc);
+        cc->client_fd = cfd; 
+        cc->ssl = ssl; 
+        cc->addr = ca;
+
+        pthread_t th;
+        if (pthread_create(&th, NULL, serve_one, cc) != 0) {
+            perror("pthread_create");
+            SSL_free(ssl);
+            close(cfd);
+            free(cc);
+            continue;
+        }
+        pthread_detach(th);
+    }
+}
+
 static void *serve_one(void *arg) {
     client_ctx_t *c = (client_ctx_t *)arg;
     char ip[INET_ADDRSTRLEN];
