@@ -58,7 +58,7 @@ static int ssl_readline_simple(SSL *ssl, char *buf, size_t cap);
 // MP3 and File Handling Functions
 int mp3_request_and_download(SSL *ssl, const char *filename, const char *output_path);
 int mp3_play(const char *filepath);
-int fetch_file_list(SSL *ssl, char names[][MAX_FILENAME_LEN], int max_names)
+int fetch_file_list(SSL *ssl, char names[][MAX_FILENAME_LEN], int max_names);
 
 // User interaction
 void ui_display_genre_menu(char *genre);
