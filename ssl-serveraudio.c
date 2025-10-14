@@ -54,6 +54,7 @@ static int create_server_socket(uint16_t port);
 // Client Connection Handling
 static void server_loop(int server_fd, SSL_CTX *ctx);
 static void *serve_one(void *arg);
+static void handle_client_connection(client_ctx_t *ctx);
 
 // Utility Functions
 static void die(const char*fmt, ...);
@@ -74,7 +75,7 @@ int main(int argc, char **argv) {
     if (stat(ROOT_DIR, &st) != 0 || !S_ISDIR(st.st_mode)) {
         die("Create directory %s and put mp3 files there", ROOT_DIR);
     }
-    
+
     init_openssl();
     SSL_CTX *ctx = make_ctx();
     int server_fd = create_server_socket((uint16_t)port);
@@ -169,19 +170,30 @@ static void server_loop(int server_fd, SSL_CTX *ctx) {
 
 static void *serve_one(void *arg) {
     client_ctx_t *c = (client_ctx_t *)arg;
+    handle_client_connection(c);
+
+    // Cleanup
+    SSL_shutdown(c->ssl);
+    SSL_free(c->ssl);
+    close(c->client_fd);
+    free(c);
+    return NULL;
+}
+
+static void handle_client_connection(client_ctx_t *ctx) {
     char ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &c->addr.sin_addr, ip, sizeof ip);
     log_msg("Client connected from %s", ip);
 
     if (SSL_accept(c->ssl) <= 0) {
         ERR_print_errors_fp(stderr);
-        goto done;
+        return;
     }
 
     char line[MAX_LINE];
     while (1) {
         ssize_t r = ssl_readline(c->ssl, line, sizeof line);
-        if (r <= 0) break;
+        if (r <= 0) break; // Client disconnected or error
 
         // Commands: LIST  |  GET <fname>  |  QUIT
         if (strcmp(line, "LIST") == 0) {
@@ -198,13 +210,6 @@ static void *serve_one(void *arg) {
             if (send_all_ssl(c->ssl, msg, strlen(msg)) != 0) break;
         }
     }
-
-done:
-    SSL_shutdown(c->ssl);
-    SSL_free(c->ssl);
-    close(c->client_fd);
-    free(c);
-    return NULL;
 }
 
 //--- Utility Functions ---//
