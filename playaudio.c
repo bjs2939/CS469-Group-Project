@@ -13,26 +13,21 @@
 #include <alsa/asoundlib.h>
 #endif
 
+mpg123_handle *init_mpg123(const char *path, long *rate, int *channels);
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "Usage: %s <file.mp3>\n", argv[0]);
         return 1;
     }
-    const char *path = argv[1];
 
-    // ---- mpg123 init ----
-    if (mpg123_init() != MPG123_OK) { fprintf(stderr, "mpg123_init failed\n"); return 1; }
-    mpg123_handle *mh = mpg123_new(NULL, NULL);
-    if (!mh) { fprintf(stderr, "mpg123_new failed\n"); mpg123_exit(); return 1; }
+    long rate; 
+    int channels;
 
-    if (mpg123_open(mh, path) != MPG123_OK) { fprintf(stderr, "Cannot open %s\n", path); goto done_mh; }
-
-    long rate; int channels, enc;
-    if (mpg123_getformat(mh, &rate, &channels, &enc) != MPG123_OK) { fprintf(stderr, "getformat failed\n"); goto done_mh; }
-
-    // force 16-bit signed LE
-    mpg123_format_none(mh);
-    mpg123_format(mh, rate, channels, MPG123_ENC_SIGNED_16);
+    mpg123_handle *mh = init_mpg123(argv[1], &rate, &channels);
+    if (!mh) {
+        return 1; // Error message is printed inside init_mpg123
+    }
 
 #ifndef NO_AUDIO
     // ---- ALSA setup ----
@@ -107,4 +102,46 @@ done_mh:
     mpg123_delete(mh);
     mpg123_exit();
     return 0;
+}
+
+/**
+ * @brief Initializes the mpg123 library, opens specified MP3 file, and 
+ * retrieves the audio format.
+ * @return A handle to the mpg123 instance, or NULL on failure.
+ */
+mpg123_handle *init_mpg123(const char *path, long *rate, int *channels) {
+    if (mpg123_init() != MPG123_OK) { 
+        fprintf(stderr, "mpg123_init failed\n"); 
+        return NULL;     
+    }
+
+    mpg123_handle *mh = mpg123_new(NULL, NULL);
+    if (!mh) { 
+        fprintf(stderr, "mpg123_new failed\n"); 
+        mpg123_exit(); 
+        return NULL; 
+    }
+
+    if (mpg123_open(mh, path) != MPG123_OK) { 
+        fprintf(stderr, "Cannot open %s\n", path); 
+        mpg123_close(mh);
+        mpg123_delete(mh);
+        mpg123_exit();
+        return NULL; 
+    }
+    
+    int enc;
+    if (mpg123_getformat(mh, &rate, &channels, &enc) != MPG123_OK) { 
+        fprintf(stderr, "getformat failed\n"); 
+        mpg123_close(mh);
+        mpg123_delete(mh);
+        mpg123_exit();
+        return NULL;
+    }
+
+    // force 16-bit signed little endian format
+    mpg123_format_none(mh);
+    mpg123_format(mh, rate, channels, MPG123_ENC_SIGNED_16);
+
+    return mh;
 }
