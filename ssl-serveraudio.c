@@ -193,21 +193,29 @@ static void handle_client_connection(client_ctx_t *ctx) {
     char line[MAX_LINE];
     while (1) {
         ssize_t r = util_ssl_readline(c->ssl, line, sizeof line);
-        if (r <= 0) break; // Client disconnected or error
+        if (r <= 0) {
+            break; // Client disconnected or error
+        }
 
         // Commands: LIST  |  GET <fname>  |  QUIT
         if (strcmp(line, "LIST") == 0) {
-            if (util_handle_list(c->ssl) != 0) break;
+            if (util_handle_list(c->ssl) != 0) {
+                break;
+            }
         } else if (strncmp(line, "GET ", 4) == 0) {
             const char *fname = line + 4;
-            if (util_handle_get(c->ssl, fname) != 0) break;
+            if (util_handle_get(c->ssl, fname) != 0) {
+                break;
+            }
         } else if (strcmp(line, "QUIT") == 0) {
             const char *msg = "OK BYE\n";
             util_send_all_ssl(c->ssl, msg, strlen(msg));
             break;
         } else {
             const char *msg = "ERR CMD\n";
-            if (util_send_all_ssl(c->ssl, msg, strlen(msg)) != 0) break;
+            if (util_send_all_ssl(c->ssl, msg, strlen(msg)) != 0) {
+                break;
+            }
         }
     }
 }
