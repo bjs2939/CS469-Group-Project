@@ -27,138 +27,144 @@
 #include <string.h>
 #include <ctype.h>
 #include <unistd.h>
-#include <netdb.h>
 #include <errno.h>
-#include <resolv.h>
-#include <fcntl.h>
-#include <sys/stat.h>
 #include <arpa/inet.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 
-#include <openssl/bio.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+
 #include <mpg123.h>
 #include <portaudio.h>
 
-#define DEFAULT_PORT        4433
 #define DEFAULT_HOST        "127.0.0.1"
+#define DEFAULT_PORT        4433
 #define BUFFER_SIZE         4096
 #define OUTPUT_PATH         "downloaded.mp3"
-#define MAX_FILENAME_LEN    256
-#define MAX_FILES           256
+#define MAX_NAME            256
+#define MAX_LIST            256
 
-// SSL/TLS Functions
-SSL_CTX* ssl_init_context();
-SSL* ssl_connect(SSL_CTX *ctx, const char *hostname, int port);
-static int ssl_readline_simple(SSL *ssl, char *buf, size_t cap);
+// flip to 0 if you want to compile without audio code at all
+#ifndef ENABLE_AUDIO
+#define ENABLE_AUDIO 1
+#endif
 
-// MP3 and File Handling Functions
-int mp3_request_and_download(SSL *ssl, const char *filename, const char *output_path);
-int mp3_play(const char *filepath);
-int fetch_file_list(SSL *ssl, char names[][MAX_FILENAME_LEN], int max_names);
+// --- tls helpers ---
+static SSL_CTX* ssl_init_context(void);
+static SSL* ssl_connect_to(SSL_CTX *ctx, const char *host, int port);
+static int ssl_readline(SSL *ssl, char *buf, size_t cap);
 
-// User interaction
-void ui_display_genre_menu(char *genre);
-void ui_get_search_term(char *term);
+// --- protocol helpers ---
+static int fetch_dir_list(SSL *ssl, char names[][MAX_NAME], int max);
+static int fetch_file_list_in_dir(SSL *ssl, const char *dirname, char names[][MAX_NAME], int max);
+static int get_file(SSL *ssl, const char *relpath, const char *outpath);
 
-// Utility Functions
-void util_to_lowercase(char *str);
+// --- ui helpers ---
+static int ui_pick(const char *title, char items[][MAX_NAME], int n);
+static void trim_eol(char *s);
 
-int main(void) {
-    // 1) TLS setup + connect
-    SSL_CTX *ctx = init_ssl_context();
-    SSL *ssl = ssl_connect(ctx, DEFAULT_HOST, DEFAULT_PORT);
-    printf("Secure connection established.\n");
+// --- audio ---
+#if ENABLE_AUDIO
+static int mp3_play(const char *filepath);
+#endif
 
-    // 2) Ask server for list of files
-    char names[256][256];
-    int num = fetch_list(ssl, names, 256);
-    if (num <= 0) {
-        fprintf(stderr, "No files available or LIST failed.\n");
-        SSL_shutdown(ssl);
-        SSL_free(ssl);
-        SSL_CTX_free(ctx);
-        return 1;
+int main(int argc, char **argv) {
+    // parse args: host port [--no-play]
+    const char *host = (argc >= 2 && argv[1][0] != '-') ? argv[1] : DEFAULT_HOST;
+    int argi = (argc >= 2 && argv[1][0] != '-') ? 2 : 1;
+
+    int port = DEFAULT_PORT;
+    if (argi < argc && argv[argi][0] != '-') { port = atoi(argv[argi]); argi++; }
+
+    int do_play = 1;
+    for (; argi < argc; ++argi) {
+        if (strcmp(argv[argi], "--no-play") == 0) do_play = 0;
     }
 
-    // 3) Show numeric menu
-    printf("\nAvailable files:\n");
-    for (int i = 0; i < num; i++) {
-        printf("%d) %s\n", i + 1, names[i]);
-    }
+    SSL_CTX *ctx = ssl_init_context();
+    SSL *ssl = ssl_connect_to(ctx, host, port);
+    if (!ssl) { fprintf(stderr, "tls connect failed\n"); SSL_CTX_free(ctx); return 1; }
+    printf("secure connection established.\n");
 
-    // 4) Read user choice
-    printf("Choose a number: ");
-    char line[32];
-    if (!fgets(line, sizeof(line), stdin)) {
-        fprintf(stderr, "Input error.\n");
-        SSL_shutdown(ssl);
-        SSL_free(ssl);
-        SSL_CTX_free(ctx);
-        return 1;
-    }
-    int choice = atoi(line);
-    if (choice < 1 || choice > num) {
-        fprintf(stderr, "Invalid choice.\n");
-        SSL_shutdown(ssl);
-        SSL_free(ssl);
-        SSL_CTX_free(ctx);
-        return 1;
-    }
-    const char *filename = names[choice - 1];
+    // 1) get folders
+    char dirs[MAX_LIST][MAX_NAME];
+    int ndirs = fetch_dir_list(ssl, dirs, MAX_LIST);
+    if (ndirs <= 0) { fprintf(stderr, "no folders or LISTDIR failed.\n"); goto done; }
 
-    // 5) GET and play
-    if (mp3_request_and_download(ssl, filename, OUTPUT_PATH) == 0) {
-        printf("Download complete. Playing MP3...\n");
-        mp3_play(OUTPUT_PATH);
+    int di = ui_pick("folders", dirs, ndirs);
+    if (di < 0) goto done;
+    const char *folder = dirs[di];
+
+    // 2) get files for folder
+    char files[MAX_LIST][MAX_NAME];
+    int nfiles = fetch_file_list_in_dir(ssl, folder, files, MAX_LIST);
+    if (nfiles <= 0) { fprintf(stderr, "no files in folder or LIST failed.\n"); goto done; }
+
+    int fi = ui_pick("files", files, nfiles);
+    if (fi < 0) goto done;
+    const char *file = files[fi];
+
+    // 3) request GET folder/file
+    char relpath[2*MAX_NAME + 8];
+    snprintf(relpath, sizeof relpath, "%s/%s", folder, file);
+
+    if (get_file(ssl, relpath, OUTPUT_PATH) == 0) {
+        printf("download complete -> %s\n", OUTPUT_PATH);
+#if ENABLE_AUDIO
+        if (do_play) {
+            printf("playing mp3...\n");
+            if (mp3_play(OUTPUT_PATH) != 0) {
+                fprintf(stderr, "playback failed (check audio in wsl)\n");
+            }
+        }
+#else
+        (void)do_play;
+#endif
     } else {
-        fprintf(stderr, "Download failed.\n");
+        fprintf(stderr, "download failed.\n");
     }
 
-    // 6) Clean up TLS
+done:
     SSL_shutdown(ssl);
     SSL_free(ssl);
     SSL_CTX_free(ctx);
     return 0;
-} //end main
+}
 
-//--- SSL and TLS ---//
-SSL_CTX* ssl_init_context() {
+// --- tls helpers ---
+
+static SSL_CTX* ssl_init_context(void) {
     SSL_library_init();
     OpenSSL_add_all_algorithms();
     SSL_load_error_strings();
     const SSL_METHOD *method = TLS_client_method();
     SSL_CTX *ctx = SSL_CTX_new(method);
-    if (!ctx) {
-        ERR_print_errors_fp(stderr);
-        exit(EXIT_FAILURE);
-    }
+    if (!ctx) { ERR_print_errors_fp(stderr); exit(EXIT_FAILURE); }
+    // trust server cert from cert.pem (same dir)
     if (!SSL_CTX_load_verify_locations(ctx, "cert.pem", NULL)) {
-        ERR_print_errors_fp(stderr);
-        exit(EXIT_FAILURE);
+        ERR_print_errors_fp(stderr); exit(EXIT_FAILURE);
     }
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
     return ctx;
 }
 
-SSL* ssl_connect(SSL_CTX *ctx, const char *hostname, int port) {
-    int sock;
-    struct sockaddr_in addr;
-    SSL *ssl;
+static SSL* ssl_connect_to(SSL_CTX *ctx, const char *host, int port) {
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) { perror("socket"); return NULL; }
 
-    sock = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in addr; memset(&addr, 0, sizeof addr);
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = inet_addr(hostname);
-
+    addr.sin_addr.s_addr = inet_addr(host);
     if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
-        perror("Connection failed");
+        perror("connect");
+        close(sock);
         return NULL;
     }
 
-    ssl = SSL_new(ctx);
+    SSL *ssl = SSL_new(ctx);
     SSL_set_fd(ssl, sock);
     if (SSL_connect(ssl) <= 0) {
         ERR_print_errors_fp(stderr);
@@ -166,95 +172,214 @@ SSL* ssl_connect(SSL_CTX *ctx, const char *hostname, int port) {
         close(sock);
         return NULL;
     }
-
     return ssl;
 }
 
-/**
- * @brief Read a single '\n'-terminated line from SSL, trim CR/LF.
- * @return Number of bytes in line (>=0) or -1 on error/closed.
- */
-static int ssl_readline_simple(SSL *ssl, char *buf, size_t cap) {
+static int ssl_readline(SSL *ssl, char *buf, size_t cap) {
     size_t n = 0;
     while (n + 1 < cap) {
         char c;
         int r = SSL_read(ssl, &c, 1);
-        if (r <= 0) return -1;
+        if (r <= 0) {
+            int err = SSL_get_error(ssl, r);
+            fprintf(stderr, "[client:ssl_readline] r=%d err=%d (0=none,2=wantread,3=wantwrite,5=SYSCALL,6=SSL)\n", r, err);
+            return (n==0) ? -1 : (int)n;
+        }
         buf[n++] = c;
         if (c == '\n') break;
     }
     buf[n] = 0;
-    while (n && (buf[n-1] == '\n' || buf[n-1] == '\r')) {
-        buf[--n] = 0;
-    }
+    while (n && (buf[n-1]=='\n' || buf[n-1]=='\r')) buf[--n] = 0;
     return (int)n;
 }
 
-//--- MP3 and File Handling --//
-int mp3_request_and_download(SSL *ssl, const char *filename, const char *output_path) {
-    // Send GET
-    char request[256];
-    snprintf(request, sizeof(request), "GET %s\n", filename);
-    if (SSL_write(ssl, request, (int)strlen(request)) <= 0) {
-        fprintf(stderr, "SSL_write GET failed\n");
+// --- protocol helpers ---
+
+static int fetch_dir_list(SSL *ssl, char names[][MAX_NAME], int max) {
+    fprintf(stderr,"[client:fetch_dir_list] sending 'LISTDIR\\n'\n");
+    int w1 = SSL_write(ssl, "LISTDIR\n", 8);
+    if (w1 <= 0) {
+        int err = SSL_get_error(ssl, w1);
+        fprintf(stderr,"[client:fetch_dir_list] SSL_write fail w1=%d err=%d\n", w1, err);
         return -1;
     }
 
-    // Read header: "OK <size>\n" or "ERR ...\n"
-    char hdr[256];
-    if (ssl_readline_simple(ssl, hdr, sizeof(hdr)) < 0) {
-        fprintf(stderr, "GET header read failed\n");
+    char line[1024];
+    int r = ssl_readline(ssl, line, sizeof line);
+    if (r < 0) { fprintf(stderr,"[client:fetch_dir_list] header read fail\n"); return -1; }
+    fprintf(stderr,"[client:fetch_dir_list] hdr='%s'\n", line);
+
+    int count = 0;
+    if (sscanf(line, "OK %d", &count) != 1 || count < 0) {
+        fprintf(stderr,"[client:fetch_dir_list] bad hdr (expected 'OK <n>')\n");
         return -1;
     }
+    fprintf(stderr,"[client:fetch_dir_list] count=%d\n", count);
+
+    int got = 0;
+    while (got < count && got < max) {
+        int rr = ssl_readline(ssl, line, sizeof line);
+        if (rr < 0) { fprintf(stderr,"[client:fetch_dir_list] body read fail @%d\n", got); return -1; }
+        if (!line[0]) break;
+        size_t len = strlen(line); if (len >= MAX_NAME) len = MAX_NAME - 1;
+        memcpy(names[got], line, len); names[got][len] = 0;
+        fprintf(stderr,"[client:fetch_dir_list] dir[%d]=%s\n", got, names[got]);
+        got++;
+    }
+    return got;
+}
+
+
+
+
+static int fetch_file_list_in_dir(SSL *ssl, const char *dirname, char names[][MAX_NAME], int max) {
+    char cmd[512];
+    snprintf(cmd, sizeof cmd, "LIST %s\n", dirname);
+    if (SSL_write(ssl, cmd, (int)strlen(cmd)) <= 0) return -1;
+
+    char line[1024];
+    if (ssl_readline(ssl, line, sizeof line) < 0) return -1;
+
+    int count = 0;
+    if (sscanf(line, "OK %d", &count) != 1 || count < 0) return -1;
+
+    int got = 0;
+    while (got < count && got < max) {
+        if (ssl_readline(ssl, line, sizeof line) < 0) return -1;
+        if (!line[0]) break;
+        size_t len = strlen(line); if (len >= MAX_NAME) len = MAX_NAME - 1;
+        memcpy(names[got], line, len); names[got][len] = 0;
+        got++;
+    }
+    return got;
+}
+
+
+// get_file: downloads one file from server
+static int get_file(SSL *ssl, const char *relpath, const char *outpath) {
+    printf("[ssl-clientaudio.c:get_file] start relpath=%s -> %s\n", relpath, outpath);
+
+    // send "GET " + relpath + "\n" safely
+    printf("[ssl-clientaudio.c:get_file] sending GET request\n");
+    if (SSL_write(ssl, "GET ", 4) <= 0) {
+        fprintf(stderr, "[ssl-clientaudio.c:get_file] SSL_write GET prefix failed\n");
+        return -1;
+    }
+
+    size_t len = strlen(relpath);
+    if (len == 0) {
+        fprintf(stderr, "[ssl-clientaudio.c:get_file] empty relpath\n");
+        return -1;
+    }
+
+    if (SSL_write(ssl, relpath, (int)len) <= 0) {
+        fprintf(stderr, "[ssl-clientaudio.c:get_file] SSL_write relpath failed\n");
+        return -1;
+    }
+
+    if (SSL_write(ssl, "\n", 1) <= 0) {
+        fprintf(stderr, "[ssl-clientaudio.c:get_file] SSL_write newline failed\n");
+        return -1;
+    }
+
+    // read header
+    printf("[ssl-clientaudio.c:get_file] waiting for header...\n");
+    char hdr[256];
+    if (ssl_readline(ssl, hdr, sizeof hdr) < 0) {
+        fprintf(stderr, "[ssl-clientaudio.c:get_file] GET header read failed\n");
+        return -1;
+    }
+    printf("[ssl-clientaudio.c:get_file] header: %s\n", hdr);
 
     long long total = 0;
     if (strncmp(hdr, "OK ", 3) == 0) {
         if (sscanf(hdr + 3, "%lld", &total) != 1 || total < 0) {
-            fprintf(stderr, "Bad OK header: %s\n", hdr);
+            fprintf(stderr, "[ssl-clientaudio.c:get_file] bad OK header: %s\n", hdr);
             return -1;
         }
     } else {
-        fprintf(stderr, "Server error: %s\n", hdr);
+        fprintf(stderr, "[ssl-clientaudio.c:get_file] server error: %s\n", hdr);
         return -1;
     }
 
-    FILE *fp = fopen(output_path, "wb");
-    if (!fp) { perror("File open failed"); return -1; }
+    // open file
+    printf("[ssl-clientaudio.c:get_file] opening output file: %s (size=%lld)\n", outpath, total);
+    FILE *fp = fopen(outpath, "wb");
+    if (!fp) {
+        perror("[ssl-clientaudio.c:get_file] fopen failed");
+        return -1;
+    }
 
+    // download loop
     char buf[BUFFER_SIZE];
     long long remaining = total;
     while (remaining > 0) {
-        int toread = (remaining > (long long)sizeof(buf)) ? (int)sizeof(buf) : (int)remaining;
-        int n = SSL_read(ssl, buf, toread);
-        if (n <= 0) { fprintf(stderr, "SSL_read body failed\n"); fclose(fp); return -1; }
+        int want = (remaining > (long long)sizeof(buf)) ? (int)sizeof(buf) : (int)remaining;
+        int n = SSL_read(ssl, buf, want);
+        if (n <= 0) {
+            fprintf(stderr, "[ssl-clientaudio.c:get_file] SSL_read body failed\n");
+            fclose(fp);
+            return -1;
+        }
         fwrite(buf, 1, (size_t)n, fp);
         remaining -= n;
+        printf("[ssl-clientaudio.c:get_file] wrote %d bytes, %lld left\n", n, remaining);
     }
 
     fclose(fp);
+    printf("[ssl-clientaudio.c:get_file] download complete -> %s\n", outpath);
     return 0;
-} //end requestMp3File
+}
 
-int mp3_play(const char *filepath) {
-    mpg123_handle *mh;
-    unsigned char *audio;
-    size_t done;
-    int err, channels, encoding;
-    long rate;
 
-    PaStream *stream;
-    Pa_Initialize();
+// --- ui helpers ---
+
+static void trim_eol(char *s) {
+    size_t n = strlen(s);
+    while (n && (s[n-1]=='\n' || s[n-1]=='\r')) s[--n] = 0;
+}
+
+static int ui_pick(const char *title, char items[][MAX_NAME], int n) {
+    printf("\n%s:\n", title);
+    for (int i = 0; i < n; ++i) printf("%d) %s\n", i + 1, items[i]);
+    printf("choose a number: ");
+    char line[64];
+    if (!fgets(line, sizeof line, stdin)) return -1;
+    trim_eol(line);
+    int choice = atoi(line);
+    if (choice < 1 || choice > n) { fprintf(stderr, "invalid choice.\n"); return -1; }
+    return choice - 1;
+}
+
+// --- audio ---
+
+#if ENABLE_AUDIO
+static int mp3_play(const char *filepath) {
+    mpg123_handle *mh = NULL;
+    unsigned char *audio = NULL;
+    size_t done = 0;
+    int err = 0, channels = 0, encoding = 0;
+    long rate = 0;
+    PaStream *stream = NULL;
+
+    if (Pa_Initialize() != paNoError) return -1;
     mpg123_init();
     mh = mpg123_new(NULL, &err);
-    mpg123_open(mh, filepath);
+    if (!mh) { Pa_Terminate(); return -1; }
+
+    if (mpg123_open(mh, filepath) != MPG123_OK) { mpg123_delete(mh); Pa_Terminate(); return -1; }
     mpg123_getformat(mh, &rate, &channels, &encoding);
 
-    Pa_OpenDefaultStream(&stream, 0, channels, paInt16, rate, BUFFER_SIZE, NULL, NULL);
+    if (Pa_OpenDefaultStream(&stream, 0, channels, paInt16, rate, BUFFER_SIZE, NULL, NULL) != paNoError) {
+        mpg123_close(mh); mpg123_delete(mh); Pa_Terminate(); return -1;
+    }
     Pa_StartStream(stream);
 
-    audio = malloc(BUFFER_SIZE);
+    audio = (unsigned char*)malloc(BUFFER_SIZE);
+    if (!audio) { Pa_StopStream(stream); Pa_CloseStream(stream); mpg123_close(mh); mpg123_delete(mh); Pa_Terminate(); return -1; }
+
     while (mpg123_read(mh, audio, BUFFER_SIZE, &done) == MPG123_OK) {
-        Pa_WriteStream(stream, audio, done / sizeof(short));
+        Pa_WriteStream(stream, audio, (unsigned long)(done / sizeof(short)));
     }
 
     free(audio);
@@ -266,72 +391,4 @@ int mp3_play(const char *filepath) {
     mpg123_exit();
     return 0;
 }
-
-/**
- * Robust LIST reader: parse "OK <count>\n" then read exactly <count> lines
- * Fetch "OK <count>\n" then read exactly <count> filenames (one per line).
- * 
- * @brief Fetches a list of files from the server.
- * @return The number of files received, or -1 on error.
- */
-int fetch_file_list(SSL *ssl, char names[][MAX_FILENAME_LEN], int max_names) {
-    // Ask server
-    if (SSL_write(ssl, "LIST\n", 5) <= 0) {
-        fprintf(stderr, "SSL_write LIST failed\n");
-        return -1;
-    }
-
-    // Read header line
-    char line[1024];
-    if (ssl_readline_simple(ssl, line, sizeof(line)) < 0) {
-        fprintf(stderr, "LIST header read failed\n");
-        return -1;
-    }
-
-    int count = -1;
-    if (sscanf(line, "OK %d", &count) != 1 || count < 0) {
-        fprintf(stderr, "Bad LIST header: %s\n", line);
-        return -1;
-    }
-    if (count == 0) return 0;
-
-    // Read exactly 'count' filenames
-    int received_count = 0;
-    for (; received_count < count && received_count < max_names; ++received_count) {
-        if (ssl_readline_simple(ssl, line, sizeof(line)) < 0) {
-            fprintf(stderr, "LIST body read failed after %d entries\n", received_count);
-            return -1;
-        }        
-        // empty line ends early
-        if (line[0] == 0) break;
-
-        // Copy name, clamp to 255
-        size_t len = strlen(line);
-        if (len > 255) len = 255;
-        memcpy(names[received_count], line, len);
-        names[received_count][len] = 0;
-    }
-    return received_count;
-} //end fetch
-
-//--- User Interface and Interaction ---//
-void ui_display_genre_menu(char *genre) {
-    printf("Select a genre:\n");
-    printf("1. Country\n2. Pop\n3. Hip Hop\n4. R&B\n5. Rock\n");
-    printf("Enter genre name: ");
-    fgets(genre, 64, stdin);
-    genre[strcspn(genre, "\n")] = '\0';
-}
-
-void ui_get_search_term(char *term) {
-    printf("Enter artist name or song title: ");
-    fgets(term, 128, stdin);
-    term[strcspn(term, "\n")] = '\0';
-}
-
-//--- Utility Functions ---//
-void util_to_lowercase(char *str) {
-    for (int i = 0; str[i]; i++) {
-        str[i] = tolower((unsigned char)str[i]);
-    }
-}
+#endif
