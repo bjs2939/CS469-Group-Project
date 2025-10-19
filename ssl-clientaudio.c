@@ -24,6 +24,13 @@
 
 
 
+// debug toggle: Print statements to show proper function
+// if 1, turns on debug mode, if 0, turns off
+#ifndef DEBUG
+#define DEBUG 1
+#endif
+
+
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,24 +52,22 @@
 #include <mpg123.h>
 #include <portaudio.h>
 
-#define DEFAULT_HOST  "127.0.0.1"
+#define DEFAULT_HOST "127.0.0.1"
 #define DEFAULT_PORT  4433
 #define BUFFER_SIZE   4096
 #define MAX_NAME      256
 #define MAX_LIST      256
 
-#ifndef ENABLE_AUDIO
+//toggle audio for troubleshoot purposes
 #define ENABLE_AUDIO 1
-#endif
 
-// debug macro: always prints 
-#define SCRIPT_NAME "ssl-clientaudio.c"
-#define DBG(fn, fmt, ...) \
-    do { \
-        printf("[" SCRIPT_NAME "] - [function %s] - " fmt "\n", fn, ##__VA_ARGS__); \
-        fflush(stdout); \
+
         
-
+// cert folder
+#define CERT_DIR "./certs"
+#define CA_FILE            CERT_DIR "/ca.crt"
+#define CLIENT_CERT_FILE   CERT_DIR "/client.crt"   
+#define CLIENT_KEY_FILE    CERT_DIR "/client.key"   
 
 // fwd decls 
 // tls
@@ -87,6 +92,29 @@ static void make_outpath_for_port(int port, const char *folder, const char *file
 #if ENABLE_AUDIO
 static int mp3_play(const char *filepath);
 #endif
+
+
+//DEBUG Function and logic
+#define SCRIPT_NAME "ssl-clientaudio.c"
+
+static int g_debug = DEBUG;
+static inline void set_debug(int on) { g_debug = on; }
+
+// Usage: DBG("tag", "fmt %d %s", n, s)
+#define DBG(tag, fmt, ...)                                                        \
+    do {                                                                          \
+        if (g_debug) {                                                            \
+            fprintf(stdout, "[%s][%s][%s] " fmt "\n",                             \
+                    SCRIPT_NAME, __func__, (tag), ##__VA_ARGS__);                 \
+            fflush(stdout);                                                       \
+        }                                                                         \
+    } while (0)
+
+static inline void DBG_SSL_ERRORS(void) {
+    if (g_debug) ERR_print_errors_fp(stderr);
+
+} //END DEBUG FUNCTIONS
+
 
 
 
@@ -221,8 +249,7 @@ done:
     return 0;
 }
 
-// tls helpers 
-
+// encrypted connection for client and server 
 static SSL_CTX* ssl_init_context(void) {
     DBG("ssl_init_context", "init openssl libs");
     SSL_library_init();
@@ -235,36 +262,73 @@ static SSL_CTX* ssl_init_context(void) {
         ERR_print_errors_fp(stderr);
         return NULL;
     }
-    // trust server cert from local cert.pem 
-    if (!SSL_CTX_load_verify_locations(ctx, "cert.pem", NULL)) {
+
+#ifdef TLS1_3_VERSION
+    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+#endif
+    SSL_CTX_set_options(ctx, SSL_OP_NO_COMPRESSION);
+
+    // Allow strong TLS 1.2 suites. TLS 1.3 suites are fixed by OpenSSL.
+    if (!SSL_CTX_set_cipher_list(ctx,
+        "ECDHE-ECDSA-AES256-GCM-SHA384:"
+        "ECDHE-ECDSA-AES128-GCM-SHA256:"
+        "ECDHE-RSA-AES256-GCM-SHA384:"
+        "ECDHE-RSA-AES128-GCM-SHA256")) {
         ERR_print_errors_fp(stderr);
         SSL_CTX_free(ctx);
         return NULL;
     }
+    // Prefer common curves
+    SSL_CTX_set1_groups_list(ctx, "P-256:X25519");
+
+    // Trust store: verify server certs issued by your CA
+    if (!SSL_CTX_load_verify_locations(ctx, CA_FILE, NULL)) {
+        ERR_print_errors_fp(stderr);
+        SSL_CTX_free(ctx);
+        return NULL;
+    }
+
+    // Load client cert and key for mTLS (server requires this)
+    if (SSL_CTX_use_certificate_file(ctx, CLIENT_CERT_FILE, SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+        SSL_CTX_free(ctx);
+        return NULL;
+    }
+    if (SSL_CTX_use_PrivateKey_file(ctx, CLIENT_KEY_FILE, SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+        SSL_CTX_free(ctx);
+        return NULL;
+    }
+    if (!SSL_CTX_check_private_key(ctx)) {
+        fprintf(stderr, "[" SCRIPT_NAME "] - [ssl_init_context] - client key does not match cert\n");
+        SSL_CTX_free(ctx);
+        return NULL;
+    }
+
+    // Always verify the server
     SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+
     DBG("ssl_init_context", "ctx ready");
     return ctx;
 }
+
+
 
 static SSL* ssl_connect_to(SSL_CTX *ctx, const char *host, int port) {
     DBG("ssl_connect_to", "connecting to %s:%d", host, port);
 
     int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
-        perror("socket");
-        return NULL;
-    }
+    if (sock < 0) { perror("socket"); return NULL; }
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof addr);
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
-        fprintf(stderr, "[" SCRIPT_NAME "] - [function ssl_connect_to] - bad host ip: %s\n", host);
+        fprintf(stderr, "[" SCRIPT_NAME "] - [ssl_connect_to] - bad host ip: %s\n", host);
         close(sock);
         return NULL;
     }
-
     if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
         perror("connect");
         close(sock);
@@ -272,17 +336,47 @@ static SSL* ssl_connect_to(SSL_CTX *ctx, const char *host, int port) {
     }
 
     SSL *ssl = SSL_new(ctx);
+    if (!ssl) { close(sock); return NULL; }
     SSL_set_fd(ssl, sock);
+
+    // SNI is fine to set
+    (void)SSL_set_tlsext_host_name(ssl, host);
+
+    // IMPORTANT: do not set X509_VERIFY_PARAM_set1_host or set1_ip_asc here
+    // We want chain verification only through CA_FILE
+    // Name checks are disabled on purpose to match our simple no-SAN cert
+
     if (SSL_connect(ssl) <= 0) {
-        ERR_print_errors_fp(stderr);
+        DBG_SSL_ERRORS();
         SSL_free(ssl);
         close(sock);
         return NULL;
     }
 
+    // Log TLS details and verify result
+    const char *proto = SSL_get_version(ssl);
+    const SSL_CIPHER *ci = SSL_get_current_cipher(ssl);
+    const char *cipher = ci ? SSL_CIPHER_get_name(ci) : "unknown";
+    long vres = SSL_get_verify_result(ssl);
+
     DBG("ssl_connect_to", "tls handshake ok");
+    DBG("ssl_connect_to", "tls info proto=%s cipher=%s verify_result=%ld", proto, cipher, vres);
+
+    // Log server cert subject for clarity
+    X509 *peer = SSL_get_peer_certificate(ssl);
+    if (peer) {
+        char subj[512];
+        X509_NAME_oneline(X509_get_subject_name(peer), subj, sizeof subj);
+        DBG("ssl_connect_to", "server cert subject: %s", subj);
+        X509_free(peer);
+    } else {
+        DBG("ssl_connect_to", "no server certificate object (unexpected)");
+    }
+
     return ssl;
 }
+
+
 
 static int ssl_readline(SSL *ssl, char *buf, size_t cap) {
     // read to newline, trim crlf 

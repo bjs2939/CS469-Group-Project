@@ -17,6 +17,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
@@ -35,11 +36,23 @@
 
 #define DEFAULT_PORT 4433
 #define ROOT_DIR "./media"
-#define CERTIFICATE_FILE "cert.pem"
-#define KEY_FILE        "key.pem"
+
+
+// certs files
+#define CERT_DIR "./certs"
+#define SERVER_CERT_FILE CERT_DIR "/server.crt"
+#define SERVER_KEY_FILE  CERT_DIR "/server.key"
+#define CA_FILE          CERT_DIR "/ca.crt"
+
+#undef REQUIRE_CLIENT_CERT
+#define REQUIRE_CLIENT_CERT 1
+
+
 #define BUF_SZ 8192
 #define MAX_LINE 512
 #define MAX_PENDING_CONNECTIONS 16
+
+
 
 // per-client ctx
 typedef struct {
@@ -102,24 +115,49 @@ static void init_openssl(void) {
     OpenSSL_add_ssl_algorithms();
 }
 
+
 static SSL_CTX *make_ctx(void) {
     const SSL_METHOD *m = TLS_server_method();
     SSL_CTX *ctx = SSL_CTX_new(m);
     if (!ctx) util_die("SSL_CTX_new failed");
 
-    // cert + key
-    if (SSL_CTX_use_certificate_file(ctx, CERTIFICATE_FILE, SSL_FILETYPE_PEM) <= 0)
-        util_die("use_certificate_file failed");
-    if (SSL_CTX_use_PrivateKey_file(ctx, KEY_FILE, SSL_FILETYPE_PEM) <= 0)
-        util_die("use_privatekey_file failed");
-    if (!SSL_CTX_check_private_key(ctx))
-        util_die("private key mismatch");
-
 #ifdef TLS1_3_VERSION
     SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
 #endif
+
+    // set server cert and key
+    if (SSL_CTX_use_certificate_file(ctx, SERVER_CERT_FILE, SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+        util_die("use_certificate_file %s failed", SERVER_CERT_FILE);
+    }
+    if (SSL_CTX_use_PrivateKey_file(ctx, SERVER_KEY_FILE, SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+        util_die("use_privatekey_file %s failed", SERVER_KEY_FILE);
+    }
+    if (!SSL_CTX_check_private_key(ctx)) {
+        util_die("private key mismatch");
+    }
+
+    // load CA for verifying peers when mTLS is enabled
+    if (REQUIRE_CLIENT_CERT) {
+        if (!SSL_CTX_load_verify_locations(ctx, CA_FILE, NULL)) {
+            ERR_print_errors_fp(stderr);
+            util_die("load CA %s failed", CA_FILE);
+        }
+        // require client cert and fail handshake if missing or untrusted
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
+        // optional: tighten accepted client certs to the CA; depth 1 is fine for student CA chains
+        SSL_CTX_set_verify_depth(ctx, 1);
+    } else {
+        // server-only auth. client is not required to present a cert.
+        // we still allow strong TLS but no peer verification on the server side.
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+    }
+
     return ctx;
 }
+
+
 
 static int create_server_socket(uint16_t port) {
     int s = socket(AF_INET, SOCK_STREAM, 0);
@@ -129,14 +167,26 @@ static int create_server_socket(uint16_t port) {
 
     struct sockaddr_in a = {0};
     a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_ANY);
+    a.sin_addr.s_addr = htonl(INADDR_ANY);   // listen on all interfaces
     a.sin_port = htons(port);
+
     if (bind(s, (struct sockaddr *)&a, sizeof(a)) < 0)
         util_die("bind: %s", strerror(errno));
     if (listen(s, MAX_PENDING_CONNECTIONS) < 0)
         util_die("listen: %s", strerror(errno));
+
+    // Print the actual address and port in use
+    struct sockaddr_in bound; socklen_t blen = sizeof(bound);
+    if (getsockname(s, (struct sockaddr *)&bound, &blen) == 0) {
+        char ip[INET_ADDRSTRLEN] = {0};
+        inet_ntop(AF_INET, &bound.sin_addr, ip, sizeof ip);
+        if (ip[0] == 0) strcpy(ip, "0.0.0.0"); // INADDR_ANY prints as empty on some stacks
+        fprintf(stderr, "[server] listening on %s:%u\n", ip, ntohs(bound.sin_port));
+    }
+
     return s;
 }
+
 
 // loop + per-client
 
