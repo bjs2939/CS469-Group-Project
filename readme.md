@@ -42,7 +42,7 @@ make FULL_STATIC=1 (tries full static build; may fail on glibc systems)
 
 
 
----CERTIFICATES: Explaination and use ---
+---CERTIFICATES: Explanation and use ---
 Folder:
 • All certificates and keys are stored in ./certs.
 
@@ -223,6 +223,7 @@ Replication: multiple servers run on different ports
 Encryption: verified using SSL handshake
 Download: client retrieves and plays MP3 files
 Fault tolerance: client reconnects to backup server without data loss
+
 
 
 
