@@ -260,16 +260,36 @@ static ssize_t util_ssl_readline(SSL *ssl, char *buf, size_t cap) {
 }
 
 
-// write all bytes
+// write all bytes w/ ssl error logging; only ends the *current* connection
 static int util_send_all_ssl(SSL *ssl, const void *buf, size_t len) {
-    const unsigned char *p = buf;
+    const unsigned char *p = (const unsigned char*)buf;
     while (len) {
-        int w = SSL_write(ssl, p, (int)((len > INT_MAX) ? INT_MAX : len));
-        if (w <= 0) return -1;
-        p += w; len -= w;
+        int chunk = (len > INT_MAX) ? INT_MAX : (int)len;
+        int w = SSL_write(ssl, p, chunk);
+        if (w > 0) {
+            p += w; len -= (size_t)w;
+            continue;
+        }
+        int err = SSL_get_error(ssl, w);
+        fprintf(stderr, "[server:send] SSL_write err=%d\n", err);
+        switch (err) {
+            case SSL_ERROR_ZERO_RETURN:   // clean shutdown from peer
+                return -1;
+            case SSL_ERROR_WANT_READ:
+            case SSL_ERROR_WANT_WRITE:
+                // non-blocking style; try again
+                continue;
+            case SSL_ERROR_SYSCALL:
+                perror("[server:send] syscall");
+                return -1;
+            default:
+                ERR_print_errors_fp(stderr);
+                return -1;
+        }
     }
     return 0;
 }
+
 
 // validate a single path component (no slashes)
 static bool util_valid_component(const char *s) {
