@@ -1,0 +1,55 @@
+5 Oct 
+submitted proposal
+
+6 oct - worked on playaudio.c, had many obstacles installing and using libraries to 
+
+7 oct Tues - 
+create the structure and blueprints of serveraudio and clientaudio based off of week 4's .c scripts and requirements for cert.pem and key.pem
+
+debug mode created for client audio, helps with troubleshooting 
+
+
+16 Oct Thurs - finally understood the purpose of makefile and making it easier to compile without having to worry abou tall the library parameters. Created a good makefile taht compiles server.c statically, but I could not figure out how to compile clientaudio statically. THere is a process for it, but for the audio libraries we are using, its too complicated for me to do in a timely manner 
+
+18 oct - perfected the replication process requirement
+simple error at one point, because the 2 clients were downloading the same name, edited the download function so that it 
+
+Just now realizing that the key.pem and cert.pem from the week 4 does not require the client side to have authentication
+We will need to change our approach to certificates so that both server and client have certificates accordingly 
+
+
+
+19 oct
+updating teh certificates for better passing course requirements
+instead of "key" and "cert" we are using ca.crt, ser.crt, and server.key, which better fits the project requirements
+
+obstacles:
+silly syntax errors, like forgetting linux using "/" forward slash not "\" backslash like windows 
+
+the new certs are messing with the default values of the ports. Server is still connecting to 127.0.0.1 by default, 
+but the certificates are not setting up for 127.0.0.1 properly. Doing lots of troubleshooting
+learned that config file might help with proper set up of certificates 
+
+1128 - still learnign how to set up a config file, seems more complicated than i anticipated. might be in over my head...
+
+1134 - silly error, attempted to update server and compile while server was ON, need to be more careful
+
+1140 - im nervous about this config file and the certificates working together, nothing seems to be going right
+
+1205 - successfully made the cerificate with the correct flags and parameters (i hope)
+making updates to makefile to account for the certificates and then running a clean build
+i hope i am almost done with the certificate issues
+
+1208 - static build for server is not working, checking install of static libraries
+1216 - files have a clean build with new certificiates, but client is getting reject for bad certs, investigating now
+
+1430 - updating readme with new certificate information
+
+
+########################################
+what i would have done differently
+######################################
+when i code, i like to keep scripts around 300 or less
+these scripts both grew to about 600 lines for various reasons
+if i had more time, i would modulate the scripts and functions better, probably splitting soem of the scripts
+however, since everythign was working, and our time was limited, i followed the "if its not broken, don't fix ti" principle, and decided to leave the scripts at 600
