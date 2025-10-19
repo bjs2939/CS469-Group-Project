@@ -1,7 +1,7 @@
 /**
  * @file ssl-clientaudio.c
  * @authors ** Kenneth Sherwood, Thomas Wintenburg, Bradley Spence **
- * @date ** 10/14/2025 **
+ * @date ** 2025-10-19 **
  * @brief Secure MP3 server for encrypted media distribution and process replication.
  *
  * This program implements the server component of a distributed MP3 media system.
